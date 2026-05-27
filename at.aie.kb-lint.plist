@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>at.aie.kb-lint</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>/Users/mackbook/code-aie/kb-lint/src/kb_lint.py</string>
+        <string>--markdown</string>
+        <string>--output</string>
+        <string>/Users/mackbook/kb/raw/kb-lint-daily.md</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Täglich 04:00 (nach kb-compile, vor Joe-Wakeup) -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mackbook/.kb-lint/kb-lint.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/mackbook/.kb-lint/kb-lint.stderr.log</string>
+</dict>
+</plist>
