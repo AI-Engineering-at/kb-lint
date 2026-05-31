@@ -1,0 +1,11 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: python
+    steps:
+      - uses: actions/checkout@v4
+      - name: install pytest
+        run: pip install --quiet pytest
+      - name: run tests
+        run: python -m pytest tests/ -q
