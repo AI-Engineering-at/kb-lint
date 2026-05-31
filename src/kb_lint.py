@@ -86,8 +86,14 @@ def parse_frontmatter(text: str) -> Optional[dict]:
     Bewusst stdlib-only — PyYAML wäre overkill für key: value Frontmatter.
     Unterstützt: simple key: value, ignoriert komplexe Strukturen.
     """
-    if not text.startswith("---"):
+    # Toleriere HTML-Kommentar-gewrapptes Frontmatter (<!--\n---\n...\n---\n-->),
+    # Konvention der Always-Loaded-Files (SYSTEM-FACTS etc.) — Tooling-Haertung 2026-05-31.
+    t = text.lstrip()
+    if t.startswith("<!--"):
+        t = t[4:].lstrip()
+    if not t.startswith("---"):
         return None
+    text = t
     lines = text.split("\n")
     if len(lines) < 2:
         return None
@@ -121,6 +127,10 @@ def kat_a_frontmatter_drift(
         if not base.exists():
             continue
         for md in base.rglob("*.md"):
+            # Tooling-Haertung 2026-05-31: rotierende Watcher-Outputs (launchd ueberschreibt taeglich)
+            # + eingefrorene Klassifikations-Backup-Snapshots (DOCU-VERSIONING-LOCK Tier-4) = kein Drift.
+            if md.name.endswith(("-daily.md", "-latest.md")) or ".classification-sweep-backup" in str(md):
+                continue
             try:
                 text = md.read_text(encoding="utf-8", errors="replace")
             except (OSError, UnicodeDecodeError) as exc:
