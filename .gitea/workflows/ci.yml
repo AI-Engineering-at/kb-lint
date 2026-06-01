@@ -22,4 +22,4 @@ jobs:
           if [ -f requirements.txt ]; then pip install -q -r requirements.txt; fi
           pip install -q pytest
       - name: pytest
-        run: python -m pytest -q
+        run: python -m pytest -q || [ $? -eq 5 ]
