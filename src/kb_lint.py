@@ -380,6 +380,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = p.parse_args(argv)
 
     kb_root = Path(args.kb_root).expanduser()
+
+    # Ein Linter, der "sauber" nicht von "nichts gefunden" unterscheiden kann, ist
+    # schlimmer als keiner -- er meldet Gruen fuer ein Verzeichnis, das es nicht gibt.
+    # Gemessen 2026-08-01 beim Ausrollen auf swarm1: dort ist $HOME=/root, die Vorgabe
+    # ~/kb zeigte auf /root/kb (existiert nicht), Ergebnis "0 findings", Exit 0.
+    # Genau die Falschmeldung, gegen die dieses Werkzeug gebaut ist.
+    if not kb_root.is_dir():
+        print(f"kb-lint: ABBRUCH -- kb-root '{kb_root}' existiert nicht oder ist kein "
+              f"Verzeichnis. Das ist KEIN sauberes Ergebnis, sondern eine nicht "
+              f"stattgefundene Messung. Richtiges Verzeichnis mit --kb-root angeben.",
+              file=sys.stderr)
+        return 3
+
+    gefunden = sum(1 for sub in args.scan_dirs
+                   for _ in (kb_root / sub).rglob("*.md")
+                   if (kb_root / sub).is_dir())
+    if gefunden == 0:
+        print(f"kb-lint: ABBRUCH -- unter '{kb_root}' liegt KEINE Markdown-Datei in den "
+              f"Scan-Verzeichnissen ({', '.join(args.scan_dirs)}). Null Befunde aus null "
+              f"Dateien ist kein Gruen.", file=sys.stderr)
+        return 3
+
     report = run_lint(kb_root, scan_dirs=args.scan_dirs)
 
     if args.markdown:
