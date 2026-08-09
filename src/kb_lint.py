@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
@@ -38,6 +39,64 @@ CROSSREF_RE = re.compile(
 
 # Default-Scope (Spec)
 DEFAULT_SCAN_DIRS = ("ops", "projects", "wiki")
+
+
+# ---------------- Nicht-prüfbare Dateien (2026-08-10) ----------------
+# Anlass: von 15 Restbefunden am 2026-08-10 waren 13 Artefakte dieses Prüfers und nicht
+# Mängel des Substrats — 8 Dateien, die `.gitignore` bewusst fängt (`*token*`, `*credential*`,
+# `*secret*`), 3 generierte pytest-Caches, 2 Verweise, die von der kb-Wurzel aus auflösen.
+# Ein Bericht mit hoher Falsch-Positiv-Quote erzieht seinen Leser zum Wegsehen; genau so sind
+# auf swarm1 sechs Tage lang 256→302 Befunde ungelesen geblieben.
+#
+# Die Ausnahme wird GEZÄHLT und im Bericht genannt. Eine stille Ausnahme wäre schlimmer als
+# der Falschbefund, weil niemand mehr sieht, dass etwas nicht geprüft wurde.
+UEBERSPRUNGEN: dict = {}
+_IGNORIERT_CACHE: dict = {}
+
+
+def _gitignoriert(kb_root: Path) -> set:
+    """Alle .md, die git bewusst ignoriert — EIN Aufruf je kb_root, nicht einer je Datei.
+
+    Ohne git gibt es hier KEINE Aussage, und die leere Menge heißt deshalb
+    „nichts ausgenommen" (alles wird geprüft) und nicht „nichts ignoriert".
+    Die sichere Richtung ist die, die keine Ausnahme erfindet.
+    """
+    schluessel = str(kb_root)
+    if schluessel in _IGNORIERT_CACHE:
+        return _IGNORIERT_CACHE[schluessel]
+    treffer: set = set()
+    try:
+        alle = [str(p) for p in kb_root.rglob("*.md")]
+        if alle:
+            r = subprocess.run(
+                ["git", "-C", str(kb_root), "check-ignore", "--stdin"],
+                input="\n".join(alle), capture_output=True, text=True, timeout=90,
+            )
+            treffer = {str(Path(z).resolve()) for z in r.stdout.splitlines() if z.strip()}
+    except Exception:  # noqa: BLE001 — kein git, kein Timeout-Budget: keine Ausnahme
+        treffer = set()
+    _IGNORIERT_CACHE[schluessel] = treffer
+    return treffer
+
+
+def nicht_pruefbar(md: Path, kb_root: Path) -> Optional[str]:
+    """Grund, warum diese Datei die Pflichten nicht schulden kann — oder None."""
+    s = str(md)
+    if ".pytest_cache" in s:
+        return "generiertes Artefakt (pytest)"
+    if "/archiv/" in s or "/archive/" in s:
+        return "eingefrorenes Archiv — byte-identisch, per Definition ohne Pflege"
+    if str(md.resolve()) in _gitignoriert(kb_root):
+        return "von git bewusst ignoriert — kann kein Commit-Datum haben"
+    return None
+
+
+def _ueberspringen(md: Path, kb_root: Path) -> bool:
+    grund = nicht_pruefbar(md, kb_root)
+    if grund is None:
+        return False
+    UEBERSPRUNGEN.setdefault(grund, []).append(str(md))
+    return True
 
 
 @dataclass
@@ -129,6 +188,8 @@ def kat_a_frontmatter_drift(
         for md in base.rglob("*.md"):
             # Tooling-Haertung 2026-05-31: rotierende Watcher-Outputs (launchd ueberschreibt taeglich)
             # + eingefrorene Klassifikations-Backup-Snapshots (DOCU-VERSIONING-LOCK Tier-4) = kein Drift.
+            if _ueberspringen(md, kb_root):
+                continue
             if md.name.endswith(("-daily.md", "-latest.md")) or ".classification-sweep-backup" in str(md):
                 continue
             try:
@@ -181,8 +242,15 @@ def _resolve_cross_ref(raw_ref: str, source_md: Path, kb_root: Path) -> Path:
         return kb_root / raw_ref[len("kb/"):]
     if raw_ref.startswith(("wiki/", "ops/", "projects/", "raw/", "personal/")):
         return kb_root / raw_ref
-    # Fallback: relativ zu Source-File
-    return (source_md.parent / raw_ref).resolve()
+    # Fallback: relativ zu Source-File — und wenn das nicht existiert, gegen die kb-Wurzel.
+    # Anlass 2026-08-10: `cross-ref: MASTER-PLAN.md` in ops/ wurde als Bruch gemeldet, obwohl
+    # `kb/MASTER-PLAN.md` existiert. Dasselbe bei NORDSTERN.md. Zwei von 15 Restbefunden waren
+    # allein diese eine fehlende Zeile.
+    relativ = (source_md.parent / raw_ref).resolve()
+    if relativ.exists():
+        return relativ
+    von_wurzel = (kb_root / raw_ref).resolve()
+    return von_wurzel if von_wurzel.exists() else relativ
 
 
 def kat_c_cross_ref_breaks(
@@ -194,6 +262,8 @@ def kat_c_cross_ref_breaks(
         if not base.exists():
             continue
         for md in base.rglob("*.md"):
+            if _ueberspringen(md, kb_root):
+                continue
             try:
                 text = md.read_text(encoding="utf-8", errors="replace")
             except (OSError, UnicodeDecodeError):
@@ -241,6 +311,8 @@ def kat_f_stale_reviews(
         if not base.exists():
             continue
         for md in base.rglob("*.md"):
+            if _ueberspringen(md, kb_root):
+                continue
             try:
                 text = md.read_text(encoding="utf-8", errors="replace")
             except (OSError, UnicodeDecodeError):
@@ -303,6 +375,7 @@ def run_lint(
     if not kb_root.exists():
         report.errors.append(f"kb_root not found: {kb_root}")
         return report
+    UEBERSPRUNGEN.clear()   # je Lauf neu — sonst summiert sich der Zähler über Testläufe
     try:
         report.kat_a = kat_a_frontmatter_drift(kb_root, scan_dirs)
         report.kat_c = kat_c_cross_ref_breaks(kb_root, scan_dirs)
@@ -323,8 +396,12 @@ def format_markdown(report: LintReport) -> str:
         "",
         f"- kb_root: `{report.kb_root}`",
         f"- total findings: {report.total()}",
-        "",
+        f"- uebersprungen (nicht pruefbar): {sum(len(v) for v in UEBERSPRUNGEN.values())}",
     ]
+    # Die Ausnahme steht IM Bericht. Eine stille Ausnahme waere schlimmer als der Falschbefund.
+    for grund, dateien in sorted(UEBERSPRUNGEN.items()):
+        lines.append(f"  - {len(dateien)}x {grund}")
+    lines.append("")
     sections = [
         ("A", "Frontmatter-Drift (M32)"),
         ("B", "PII-Scan (Stub W79+)"),
