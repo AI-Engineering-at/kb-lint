@@ -106,6 +106,11 @@ class Finding:
     path: str
     detail: str
     severity: str = "info"  # info | warn | error
+    # Trennt "gefunden" von "gar nicht geprueft". Ohne dieses Feld sind beide
+    # nur Zeilen in derselben Liste, und die Summe darueber mischt sie zu einer
+    # Zahl ohne Nenner (gemessen 2026-08-10: "total findings: 63" = 61 echte
+    # Befunde + 2 ungebaute Kategorien).
+    gemessen: bool = True
 
 
 @dataclass
@@ -120,18 +125,52 @@ class LintReport:
     kat_f: List[Finding] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
+    # Der Vertrag nach aussen. NICHT aendern: kb-lint-watcher-shim.sh (sed) und
+    # kb-lint-befunde.py (regex) binden auf die Zeile "- total findings: N", die
+    # daraus entsteht. Ein leerer Klartext bei Exit 1 heisst laut Template-Guard
+    # in melde.sh: kein Post (TASK-2026-01100).
     def total(self) -> int:
         return sum(
             len(getattr(self, f"kat_{k}"))
             for k in ("a", "b", "c", "d", "e", "f")
         )
 
+    def kategorien_nicht_gemessen(self) -> List[str]:
+        """Kategorien, die eine Nicht-Messung melden — als Grossbuchstaben, sortiert.
+
+        Eine Kategorie zaehlt hier hinein, sobald sie EINEN ungemessenen Befund
+        traegt. Kat D kann beides zugleich sein: die Kaskaden-Analyse fehlt (nicht
+        gemessen), und quarantine.json existiert (echter Befund). Beides bleibt
+        sichtbar, statt dass eines das andere verdeckt.
+        """
+        return [
+            k.upper()
+            for k in ("a", "b", "c", "d", "e", "f")
+            if any(not f.gemessen for f in getattr(self, f"kat_{k}"))
+        ]
+
+    def befunde_echt(self) -> int:
+        """Befunde aus tatsaechlich durchgefuehrten Pruefungen."""
+        return sum(
+            1
+            for k in ("a", "b", "c", "d", "e", "f")
+            for f in getattr(self, f"kat_{k}")
+            if f.gemessen
+        )
+
     def to_dict(self) -> dict:
+        nicht = self.kategorien_nicht_gemessen()
         out = {
             "started": self.started,
             "kb_root": self.kb_root,
             "errors": self.errors,
             "total_findings": self.total(),
+            # Der Nenner zur Zahl darueber (Non-Negotiable 2). Ohne ihn sieht der
+            # Bau von D und E wie ein Rueckgang der Befunde aus.
+            "kategorien_gesamt": 6,
+            "kategorien_gemessen": 6 - len(nicht),
+            "kategorien_nicht_gemessen": nicht,
+            "befunde_echt": self.befunde_echt(),
         }
         for k in ("a", "b", "c", "d", "e", "f"):
             out[f"kat_{k}"] = [asdict(f) for f in getattr(self, f"kat_{k}")]
@@ -507,6 +546,7 @@ def _nicht_gemessen(kat: str, was: str, warum: str) -> Finding:
         detail=(f"NICHT GEMESSEN — {was} ist nicht implementiert. {warum} "
                 f"Das ist KEIN Grün: es wurde nichts geprüft, nicht nichts gefunden."),
         severity="error",
+        gemessen=False,
     )
 
 
@@ -564,28 +604,49 @@ def run_lint(
 # ---------------- Output-Formatter ----------------
 
 def format_markdown(report: LintReport) -> str:
+    nicht = report.kategorien_nicht_gemessen()
     lines = [
         f"# kb-lint-Lauf {report.started}",
         "",
         f"- kb_root: `{report.kb_root}`",
+        # WORTLAUT FESTGENAGELT: kb-lint-watcher-shim.sh (sed) und
+        # kb-lint-befunde.py:58 (regex) lesen genau diese Zeile. Neues wird
+        # ANGEHAENGT, nie eingesetzt.
         f"- total findings: {report.total()}",
-        f"- uebersprungen (nicht pruefbar): {sum(len(v) for v in UEBERSPRUNGEN.values())}",
+        f"- Kategorien: {6 - len(nicht)} von 6 gemessen"
+        + (f" · {len(nicht)} NICHT GEBAUT ({', '.join(nicht)})" if nicht else ""),
     ]
+    # Nur wenn beide Sorten vorkommen. Sind alle Kategorien gemessen, waere die
+    # Zeile eine Wiederholung von "total findings" und damit Fuellstoff.
+    if nicht:
+        lines.append(
+            f"- davon echte Befunde: {report.befunde_echt()} · "
+            f"Nicht-Messungen: {report.total() - report.befunde_echt()}"
+        )
+    lines.append(
+        f"- uebersprungen (nicht pruefbar): {sum(len(v) for v in UEBERSPRUNGEN.values())}"
+    )
     # Die Ausnahme steht IM Bericht. Eine stille Ausnahme waere schlimmer als der Falschbefund.
     for grund, dateien in sorted(UEBERSPRUNGEN.items()):
         lines.append(f"  - {len(dateien)}x {grund}")
     lines.append("")
+    # Die Titel nennen die Kategorie, NICHT ihren Zustand. Bis 2026-08-10 stand
+    # "— NICHT GEBAUT" fest im Titel von D und E: eine Beschriftung, die eine
+    # Aussage ueber den Zustand macht und dabei eine Konstante ist. Sie waere in
+    # dem Moment zur Luege geworden, in dem jemand D oder E baut, ohne an den
+    # Titel zu denken. Der Zusatz wird jetzt aus dem Befund abgeleitet.
     sections = [
         ("A", "Frontmatter-Drift (M32)"),
         ("B", "PII-Scan (Mail/IBAN/SVNR/Tel/Geburtsdatum — findet KEINE Namen)"),
         ("C", "Cross-Ref-Brüche"),
-        ("D", "Quarantine-Cascades — NICHT GEBAUT"),
-        ("E", "Suggested Concepts — NICHT GEBAUT"),
+        ("D", "Quarantine-Cascades"),
+        ("E", "Suggested Concepts"),
         ("F", "Stale Reviews"),
     ]
     for code, title in sections:
         kat = getattr(report, f"kat_{code.lower()}")
-        lines.append(f"## Kat {code} — {title}")
+        zusatz = " — NICHT GEBAUT" if code in nicht else ""
+        lines.append(f"## Kat {code} — {title}{zusatz}")
         if not kat:
             lines.append("- (keine Befunde)")
         else:
