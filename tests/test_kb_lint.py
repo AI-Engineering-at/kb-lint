@@ -202,17 +202,45 @@ def test_kat_b_nennt_nenner_und_grenze(kb_tmp: Path):
     assert "unterdrückt" in erhebung[0].detail
 
 
-def test_kat_d_quarantine_absent_returns_empty(kb_tmp: Path):
-    assert kb_lint.kat_d_quarantine_cascade_stub(kb_tmp) == []
+def test_kat_d_sagt_dass_sie_nicht_gemessen_hat(kb_tmp: Path):
+    """Eine ungebaute Pruefung darf schweigen — sie darf nicht "sauber" sagen.
+
+    Bis 2026-08-10 gab Kat D eine leere Liste zurueck, und der Bericht schrieb
+    darunter "(keine Befunde)" — derselbe Satz wie bei einer Kategorie, die
+    wirklich gemessen und nichts gefunden hat. Von aussen nicht unterscheidbar.
+    Joe dazu: "attrappen wtf das ist sabotage". Die Regel steht als A33 laengst
+    im Haus; sie wurde hier ueber Monate verletzt.
+    """
+    f = kb_lint.kat_d_quarantine_cascade(kb_tmp)
+    assert f, "Kat D schweigt wieder — das ist der alte Zustand"
+    assert any("NICHT GEMESSEN" in x.detail for x in f)
+    assert any(x.severity == "error" for x in f)
 
 
-def test_kat_d_quarantine_present(kb_tmp: Path):
+def test_kat_e_sagt_dass_sie_nicht_gemessen_hat(kb_tmp: Path):
+    f = kb_lint.kat_e_suggested_concepts(kb_tmp)
+    assert any("NICHT GEMESSEN" in x.detail for x in f)
+    assert any(x.severity == "error" for x in f)
+
+
+def test_kat_d_meldet_die_quarantaene_datei_zusaetzlich(kb_tmp: Path):
+    """Existiert die Quelle, wird sie genannt — zusaetzlich zum Nicht-gemessen."""
     qpath = kb_tmp / ".provenance" / "quarantine.json"
     qpath.parent.mkdir()
     qpath.write_text('{"entries": []}', encoding="utf-8")
-    findings = kb_lint.kat_d_quarantine_cascade_stub(kb_tmp)
-    assert len(findings) == 1
-    assert "quarantine.json" in findings[0].detail
+    findings = kb_lint.kat_d_quarantine_cascade(kb_tmp)
+    assert any("quarantine.json" in f.detail for f in findings)
+    assert any("NICHT GEMESSEN" in f.detail for f in findings)
+
+
+def test_bericht_schreibt_nie_keine_befunde_fuer_ungebautes(kb_tmp: Path):
+    """Der eigentliche Schutz: der Markdown-Bericht darf D/E nicht gruen faerben."""
+    _write(kb_tmp / "ops" / "eine.md", "---\nstand: 2026-08-10\n---\nInhalt.\n")
+    report = kb_lint.run_lint(kb_tmp)
+    md = kb_lint.format_markdown(report)
+    d_block = md.split("## Kat D")[1].split("## Kat E")[0]
+    assert "(keine Befunde)" not in d_block, d_block
+    assert "NICHT GEMESSEN" in d_block
 
 
 # ---------------- Runner + Formatter ----------------

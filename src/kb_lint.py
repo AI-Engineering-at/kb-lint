@@ -4,7 +4,8 @@
 M40-Bauteil. SSOT: ~/.claude/skills/kb-lint/SKILL.md.
 
 MVP Welle W78-A: Kat A (Frontmatter-Drift), Kat C (Cross-Ref-Brüche),
-Kat F (Stale-Reviews). Kat B seit 2026-08-10 echt; D/E sind noch Stubs.
+Kat F (Stale-Reviews). Kat B seit 2026-08-10 echt; D/E sind nicht gebaut
+und melden das ausdruecklich, statt '(keine Befunde)' zu schreiben.
 
 Anti-Pattern-Vakzinen:
 - A33 KEIN-MOCK: Wenn .provenance/quarantine.json fehlt → leeres Result,
@@ -114,8 +115,8 @@ class LintReport:
     kat_a: List[Finding] = field(default_factory=list)
     kat_b: List[Finding] = field(default_factory=list)  # PII — echt seit 2026-08-10
     kat_c: List[Finding] = field(default_factory=list)
-    kat_d: List[Finding] = field(default_factory=list)  # Quarantine — Stub
-    kat_e: List[Finding] = field(default_factory=list)  # Suggested — Stub
+    kat_d: List[Finding] = field(default_factory=list)  # Quarantine — nicht gebaut, meldet das
+    kat_e: List[Finding] = field(default_factory=list)  # Suggested — nicht gebaut, meldet das
     kat_f: List[Finding] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
 
@@ -483,25 +484,54 @@ def _maskiere(wert: str) -> str:
     return f"{w[:3]}…{w[-2:]} ({len(w)} Zeichen)"
 
 
-def kat_d_quarantine_cascade_stub(kb_root: Path) -> List[Finding]:
-    """TODO W79+: liest .provenance/quarantine.json. Wenn nicht vorhanden → leer."""
+# WARUM DIESE BEIDEN JETZT LAUT SIND (2026-08-10)
+#
+# Sie gaben eine leere Liste zurück, und der Bericht schrieb darunter
+# „(keine Befunde)" — genau derselbe Satz wie bei einer Kategorie, die wirklich
+# gemessen und nichts gefunden hat. Von außen war das nicht zu unterscheiden.
+#
+# Joe dazu, am 2026-08-10: *„attrappen wtf das ist sabotage"*. Er hat recht, und
+# die Regel steht seit langem im Haus (A33: kein Platzhalter im Produktivpfad,
+# leer oder unbekannt → ehrlich `—` und der Grund dazu). Sie wurde hier über
+# Monate verletzt, während zwei Skills — kb-compile und kb-fileback — sich auf
+# den PII-Scan als Pflicht-Vorbedingung beriefen.
+#
+# Das Vokabular für den ehrlichen Fall gibt es im Haus bereits: `melde.sh` kennt
+# Exit 3 als „NICHT GEMESSEN — das ist KEIN Grün". Genau das steht ab jetzt hier.
+# Eine ungebaute Prüfung darf schweigen — sie darf nur nicht „sauber" sagen.
+
+def _nicht_gemessen(kat: str, was: str, warum: str) -> Finding:
+    return Finding(
+        kat=kat,
+        path="(nicht gebaut)",
+        detail=(f"NICHT GEMESSEN — {was} ist nicht implementiert. {warum} "
+                f"Das ist KEIN Grün: es wurde nichts geprüft, nicht nichts gefunden."),
+        severity="error",
+    )
+
+
+def kat_d_quarantine_cascade(kb_root: Path) -> List[Finding]:
+    """Quarantäne-Kaskaden. Die Kaskaden-Logik fehlt und sagt das auch."""
+    befunde = [_nicht_gemessen(
+        "D", "die Kaskaden-Analyse",
+        "Sie soll aus .provenance/quarantine.json ableiten, welche abgeleiteten "
+        "Dokumente mit einer quarantänisierten Quelle mitfallen.")]
     qpath = kb_root / ".provenance" / "quarantine.json"
-    if not qpath.exists():
-        return []
-    # Vorerst nur Existenz melden — echte Cascade-Logik in W79+
-    return [
-        Finding(
-            kat="D",
-            path=str(qpath),
-            detail="quarantine.json existiert (Cascade-Analyse W79+)",
-            severity="info",
-        )
-    ]
+    if qpath.exists():
+        befunde.append(Finding(
+            kat="D", path=str(qpath.relative_to(kb_root)),
+            detail="quarantine.json existiert — die Kaskade dahinter ist ungeprüft",
+            severity="warn",
+        ))
+    return befunde
 
 
-def kat_e_suggested_concepts_stub(kb_root: Path) -> List[Finding]:
-    """TODO W79+: aie-semantic-search-Clustering. Stub leer."""
-    return []
+def kat_e_suggested_concepts(kb_root: Path) -> List[Finding]:
+    """Verdichtungs-Kandidaten. Das Clustering fehlt und sagt das auch."""
+    return [_nicht_gemessen(
+        "E", "das Konzept-Clustering",
+        "Es soll über aie-semantic-search Häufungen in raw/ finden, aus denen ein "
+        "wiki-Artikel werden sollte.")]
 
 
 # ---------------- Runner ----------------
@@ -524,8 +554,8 @@ def run_lint(
         report.kat_c = kat_c_cross_ref_breaks(kb_root, scan_dirs)
         report.kat_f = kat_f_stale_reviews(kb_root, scan_dirs, today=today)
         report.kat_b = kat_b_pii_scan(kb_root, scan_dirs)
-        report.kat_d = kat_d_quarantine_cascade_stub(kb_root)
-        report.kat_e = kat_e_suggested_concepts_stub(kb_root)
+        report.kat_d = kat_d_quarantine_cascade(kb_root)
+        report.kat_e = kat_e_suggested_concepts(kb_root)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"runner-exception: {type(exc).__name__}: {exc}")
     return report
@@ -549,8 +579,8 @@ def format_markdown(report: LintReport) -> str:
         ("A", "Frontmatter-Drift (M32)"),
         ("B", "PII-Scan (Mail/IBAN/SVNR/Tel/Geburtsdatum — findet KEINE Namen)"),
         ("C", "Cross-Ref-Brüche"),
-        ("D", "Quarantine-Cascades (Stub W79+)"),
-        ("E", "Suggested Concepts (Stub W79+)"),
+        ("D", "Quarantine-Cascades — NICHT GEBAUT"),
+        ("E", "Suggested Concepts — NICHT GEBAUT"),
         ("F", "Stale Reviews"),
     ]
     for code, title in sections:
