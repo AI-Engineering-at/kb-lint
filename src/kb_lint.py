@@ -123,6 +123,7 @@ class LintReport:
     kat_d: List[Finding] = field(default_factory=list)  # Quarantine — nicht gebaut, meldet das
     kat_e: List[Finding] = field(default_factory=list)  # Suggested — nicht gebaut, meldet das
     kat_f: List[Finding] = field(default_factory=list)
+    kat_g: List[Finding] = field(default_factory=list)  # KEDB-Hygiene — seit 2026-08-21 (TASK-2026-01441)
     errors: List[str] = field(default_factory=list)
 
     # Der Vertrag nach aussen. NICHT aendern: kb-lint-watcher-shim.sh (sed) und
@@ -132,7 +133,7 @@ class LintReport:
     def total(self) -> int:
         return sum(
             len(getattr(self, f"kat_{k}"))
-            for k in ("a", "b", "c", "d", "e", "f")
+            for k in ("a", "b", "c", "d", "e", "f", "g")
         )
 
     def kategorien_nicht_gemessen(self) -> List[str]:
@@ -145,7 +146,7 @@ class LintReport:
         """
         return [
             k.upper()
-            for k in ("a", "b", "c", "d", "e", "f")
+            for k in ("a", "b", "c", "d", "e", "f", "g")
             if any(not f.gemessen for f in getattr(self, f"kat_{k}"))
         ]
 
@@ -153,7 +154,7 @@ class LintReport:
         """Befunde aus tatsaechlich durchgefuehrten Pruefungen."""
         return sum(
             1
-            for k in ("a", "b", "c", "d", "e", "f")
+            for k in ("a", "b", "c", "d", "e", "f", "g")
             for f in getattr(self, f"kat_{k}")
             if f.gemessen
         )
@@ -167,12 +168,12 @@ class LintReport:
             "total_findings": self.total(),
             # Der Nenner zur Zahl darueber (Non-Negotiable 2). Ohne ihn sieht der
             # Bau von D und E wie ein Rueckgang der Befunde aus.
-            "kategorien_gesamt": 6,
-            "kategorien_gemessen": 6 - len(nicht),
+            "kategorien_gesamt": 7,
+            "kategorien_gemessen": 7 - len(nicht),
             "kategorien_nicht_gemessen": nicht,
             "befunde_echt": self.befunde_echt(),
         }
-        for k in ("a", "b", "c", "d", "e", "f"):
+        for k in ("a", "b", "c", "d", "e", "f", "g"):
             out[f"kat_{k}"] = [asdict(f) for f in getattr(self, f"kat_{k}")]
         return out
 
@@ -574,6 +575,53 @@ def kat_e_suggested_concepts(kb_root: Path) -> List[Finding]:
         "wiki-Artikel werden sollte.")]
 
 
+def kat_g_kedb_hygiene(kb_root: Path) -> List[Finding]:
+    """KEDB-Hygiene (TASK-2026-01441, 2026-08-21): eindeutige KE-IDs, stimmende Teil-C-Zahl.
+
+    Gemessen am 2026-08-21: 8 IDs je zweimal mit verschiedenen Titeln (KE-2026-08-10-A..G,
+    KE-2026-08-13-B) — 377 Eintraege, 369 eindeutig — und "29 gelernte Korrekturen" ueber
+    einer Tabelle mit 31 Zeilen. Die Datei verlangt eindeutige IDs und pruefte sie nicht.
+    Nachtraege gehoeren unter "### Nachtrag zu KE-…", nicht unter eine zweite Ueberschrift
+    mit derselben ID — sonst ist ein Verweis auf die ID nicht mehr eindeutig.
+    """
+    kedb = kb_root / "ops" / "KNOWN-ERRORS-DB.md"
+    if not kedb.exists():
+        return [_nicht_gemessen("G", "die KEDB-Hygiene", f"{kedb.relative_to(kb_root)} fehlt")]
+    zeilen = kedb.read_text(encoding="utf-8", errors="replace").splitlines()
+    rel = str(kedb.relative_to(kb_root))
+    befunde: List[Finding] = []
+    orte: dict = {}
+    for nr, z in enumerate(zeilen, 1):
+        m = re.match(r"^#{2,3} (KE-\d{4}-\d{2}-\d{2}-[A-Z]+\d?)\b", z)
+        if m:
+            orte.setdefault(m.group(1), []).append(nr)
+    for ke, nrs in sorted(orte.items()):
+        if len(nrs) > 1:
+            befunde.append(Finding(
+                kat="G", path=rel, severity="error",
+                detail=f"{ke} {len(nrs)}x als Ueberschrift: Z. {', '.join(map(str, nrs))} — "
+                       "ein Verweis auf diese ID ist nicht eindeutig",
+            ))
+    # Teil C: Zahl in der Ueberschrift gegen Datenzeilen der Tabelle darunter
+    for i, z in enumerate(zeilen):
+        m = re.match(r"^## Teil C\b.*?\((\d+) gelernte Korrekturen", z)
+        if not m:
+            continue
+        soll = int(m.group(1)); ist = 0
+        for w in zeilen[i + 1:]:
+            if w.startswith("## "):
+                break
+            if w.startswith("|") and not w.startswith("|--") and not re.match(r"^\|\s*KE\s*\|", w):
+                ist += 1
+        if soll != ist:
+            befunde.append(Finding(
+                kat="G", path=rel, severity="warn",
+                detail=f"Teil C nennt {soll} gelernte Korrekturen, die Tabelle hat {ist} Zeilen (Z. {i + 1})",
+            ))
+        break
+    return befunde
+
+
 # ---------------- Runner ----------------
 
 def run_lint(
@@ -596,6 +644,7 @@ def run_lint(
         report.kat_b = kat_b_pii_scan(kb_root, scan_dirs)
         report.kat_d = kat_d_quarantine_cascade(kb_root)
         report.kat_e = kat_e_suggested_concepts(kb_root)
+        report.kat_g = kat_g_kedb_hygiene(kb_root)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"runner-exception: {type(exc).__name__}: {exc}")
     return report
@@ -613,7 +662,7 @@ def format_markdown(report: LintReport) -> str:
         # kb-lint-befunde.py:58 (regex) lesen genau diese Zeile. Neues wird
         # ANGEHAENGT, nie eingesetzt.
         f"- total findings: {report.total()}",
-        f"- Kategorien: {6 - len(nicht)} von 6 gemessen"
+        f"- Kategorien: {7 - len(nicht)} von 7 gemessen"
         + (f" · {len(nicht)} NICHT GEBAUT ({', '.join(nicht)})" if nicht else ""),
     ]
     # Nur wenn beide Sorten vorkommen. Sind alle Kategorien gemessen, waere die
@@ -642,6 +691,7 @@ def format_markdown(report: LintReport) -> str:
         ("D", "Quarantine-Cascades"),
         ("E", "Suggested Concepts"),
         ("F", "Stale Reviews"),
+        ("G", "KEDB-Hygiene (eindeutige KE-IDs, Bestandszahl Teil C)"),
     ]
     for code, title in sections:
         kat = getattr(report, f"kat_{code.lower()}")

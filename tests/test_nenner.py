@@ -42,6 +42,11 @@ def kb_tmp(tmp_path: Path) -> Path:
         "---\nstand: 2026-08-10\nmutability: mutable-mit-stand\nclassification: internal\n---\n# Inhalt\n",
         encoding="utf-8",
     )
+    # Kat G (seit 2026-08-21) misst ops/KNOWN-ERRORS-DB.md — eine saubere Mini-KEDB,
+    # damit G als GEMESSEN zaehlt und nur D/E die Ungebauten bleiben.
+    (tmp_path / "ops" / "KNOWN-ERRORS-DB.md").write_text(
+        "# KEDB\n## Teil C — Index (1 gelernte Korrekturen)\n| KE | F |\n|---|---|\n| a | b |\n## Teil A\n## KE-2026-01-01-A — x\n"
+    )
     return tmp_path
 
 
@@ -77,7 +82,7 @@ def test_befundzahl_im_bericht_stimmt_mit_total_ueberein(kb_tmp: Path):
 
 def test_kategorien_zeile_nennt_nenner_und_die_ungebauten(kb_tmp: Path):
     md = kb_lint.format_markdown(kb_lint.run_lint(kb_tmp))
-    assert "- Kategorien: 4 von 6 gemessen · 2 NICHT GEBAUT (D, E)" in md
+    assert "- Kategorien: 5 von 7 gemessen · 2 NICHT GEBAUT (D, E)" in md
 
 
 def test_nicht_gemessene_kategorien_werden_namentlich_genannt(kb_tmp: Path):
@@ -97,8 +102,8 @@ def test_aufteilungszeile_erscheint_nur_wenn_beide_sorten_vorkommen(kb_tmp: Path
 
 def test_to_dict_traegt_den_nenner_mit(kb_tmp: Path):
     d = kb_lint.run_lint(kb_tmp).to_dict()
-    assert d["kategorien_gesamt"] == 6
-    assert d["kategorien_gemessen"] == 4
+    assert d["kategorien_gesamt"] == 7
+    assert d["kategorien_gemessen"] == 5
     assert d["kategorien_nicht_gemessen"] == ["D", "E"]
     assert d["befunde_echt"] == d["total_findings"] - 2
 
@@ -123,12 +128,12 @@ def test_kat_d_kann_zugleich_ungemessen_und_fuendig_sein(kb_tmp: Path):
 
 # ---------------- Positivkontrolle ----------------
 
-def test_ohne_ungebaute_kategorien_nennt_die_zeile_sechs_von_sechs():
+def test_ohne_ungebaute_kategorien_nennt_die_zeile_sieben_von_sieben():
     """Sonst wuerde '4 von 6' auch dann stehen, wenn alles gemessen waere —
     und die Zeile bewiese nichts."""
     report = kb_lint.LintReport(started="t", kb_root="/x")
     report.kat_a = [kb_lint.Finding(kat="A", path="p", detail="d")]
     md = kb_lint.format_markdown(report)
-    assert "- Kategorien: 6 von 6 gemessen" in md
+    assert "- Kategorien: 7 von 7 gemessen" in md
     assert "NICHT GEBAUT" not in md
     assert "- davon echte Befunde:" not in md
