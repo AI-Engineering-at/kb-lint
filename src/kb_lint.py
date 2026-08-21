@@ -124,6 +124,7 @@ class LintReport:
     kat_e: List[Finding] = field(default_factory=list)  # Suggested — nicht gebaut, meldet das
     kat_f: List[Finding] = field(default_factory=list)
     kat_g: List[Finding] = field(default_factory=list)  # KEDB-Hygiene — seit 2026-08-21 (TASK-2026-01441)
+    kat_h: List[Finding] = field(default_factory=list)  # Senke ohne Leser — seit 2026-08-21 (TASK-2026-01438)
     errors: List[str] = field(default_factory=list)
 
     # Der Vertrag nach aussen. NICHT aendern: kb-lint-watcher-shim.sh (sed) und
@@ -133,7 +134,7 @@ class LintReport:
     def total(self) -> int:
         return sum(
             len(getattr(self, f"kat_{k}"))
-            for k in ("a", "b", "c", "d", "e", "f", "g")
+            for k in ("a", "b", "c", "d", "e", "f", "g", "h")
         )
 
     def kategorien_nicht_gemessen(self) -> List[str]:
@@ -146,7 +147,7 @@ class LintReport:
         """
         return [
             k.upper()
-            for k in ("a", "b", "c", "d", "e", "f", "g")
+            for k in ("a", "b", "c", "d", "e", "f", "g", "h")
             if any(not f.gemessen for f in getattr(self, f"kat_{k}"))
         ]
 
@@ -154,7 +155,7 @@ class LintReport:
         """Befunde aus tatsaechlich durchgefuehrten Pruefungen."""
         return sum(
             1
-            for k in ("a", "b", "c", "d", "e", "f", "g")
+            for k in ("a", "b", "c", "d", "e", "f", "g", "h")
             for f in getattr(self, f"kat_{k}")
             if f.gemessen
         )
@@ -168,12 +169,12 @@ class LintReport:
             "total_findings": self.total(),
             # Der Nenner zur Zahl darueber (Non-Negotiable 2). Ohne ihn sieht der
             # Bau von D und E wie ein Rueckgang der Befunde aus.
-            "kategorien_gesamt": 7,
-            "kategorien_gemessen": 7 - len(nicht),
+            "kategorien_gesamt": 8,
+            "kategorien_gemessen": 8 - len(nicht),
             "kategorien_nicht_gemessen": nicht,
             "befunde_echt": self.befunde_echt(),
         }
-        for k in ("a", "b", "c", "d", "e", "f", "g"):
+        for k in ("a", "b", "c", "d", "e", "f", "g", "h"):
             out[f"kat_{k}"] = [asdict(f) for f in getattr(self, f"kat_{k}")]
         return out
 
@@ -622,6 +623,117 @@ def kat_g_kedb_hygiene(kb_root: Path) -> List[Finding]:
     return befunde
 
 
+# ---------------- Kat H: Senke ohne Leser (Gate D) ----------------
+
+def _klammern_auf(muster: str) -> List[str]:
+    """{a,b}-Gruppen ausmultiplizieren: 'x-{a,b}.json' -> ['x-a.json', 'x-b.json']."""
+    m = re.search(r"\{([^{}]*)\}", muster)
+    if not m:
+        return [muster]
+    out: List[str] = []
+    for teil in m.group(1).split(","):
+        out.extend(_klammern_auf(muster[:m.start()] + teil.strip() + muster[m.end():]))
+    return out
+
+
+def _passt(muster: str, rel: str, ist_ordner: bool) -> bool:
+    import fnmatch
+    for m in _klammern_auf(muster):
+        if m.endswith("/**"):
+            kopf = m[:-3]
+            if ist_ordner and fnmatch.fnmatchcase(rel, kopf):
+                return True
+            if not ist_ordner and rel.startswith(kopf.rstrip("/") + "/"):
+                return True
+            if not ist_ordner and "/" in rel and fnmatch.fnmatchcase(rel.split("/", 1)[0], kopf):
+                return True
+        elif not ist_ordner and fnmatch.fnmatchcase(rel, m):
+            return True
+    return False
+
+
+def kat_h_senken(kb_root: Path, today: Optional[date] = None) -> List[Finding]:
+    """Gate D (TASK-2026-01438): keine Senke ohne eingetragenen Leser — und keinen Leser,
+    der auf einen stillen Schreiber wartet.
+
+    Gemessen 2026-08-21: 278 Einträge in kb/.live; antistillstand (66) und
+    directive-reconcile (60) enden am 09.08., ihr Leser brain-next-step meldet seitdem
+    bei jedem Start "kein Lauf-Beleg"; supply-chain-report (22) hat keinen Leser.
+    Drei Prüfungen gegen control-plane/registries/senken.yaml — siehe Kopf der Datei.
+    Das Alter kommt aus dem DATUM IM DATEINAMEN, wo es eines gibt: mtime ist in einem
+    Git-Klon die Checkout-Zeit, kein Lauf (KE-2026-08-10-C2).
+    """
+    today = today or date.today()
+    reg = kb_root / "control-plane" / "registries" / "senken.yaml"
+    live = kb_root / ".live"
+    if not reg.exists():
+        return [_nicht_gemessen("H", "die Senken-Registry", f"{reg.relative_to(kb_root)} fehlt")]
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        return [_nicht_gemessen("H", "die Senken-Registry", "pyyaml fehlt auf diesem Host")]
+    try:
+        eintraege = (yaml.safe_load(reg.read_text(encoding="utf-8")) or {}).get("senken") or []
+    except Exception as exc:  # noqa: BLE001
+        return [_nicht_gemessen("H", "die Senken-Registry", f"senken.yaml nicht lesbar: {type(exc).__name__}")]
+    if not live.is_dir():
+        return [_nicht_gemessen("H", "kb/.live", "Verzeichnis fehlt")]
+
+    befunde: List[Finding] = []
+    relreg = str(reg.relative_to(kb_root))
+    # Bestand: Dateien rekursiv, Ordner nur oberste Ebene (ein Ordner-Eintrag deckt seinen Inhalt)
+    dateien = sorted(str(p.relative_to(live)) for p in live.rglob("*") if p.is_file())
+    ordner = sorted(p.name for p in live.iterdir() if p.is_dir())
+    treffer: dict = {e.get("muster", ""): [] for e in eintraege}
+    ohne_eintrag: List[str] = []
+    for rel in dateien:
+        gefunden = False
+        for e in eintraege:
+            if _passt(e.get("muster", ""), rel, False):
+                treffer[e["muster"]].append(rel); gefunden = True
+        if not gefunden:
+            ohne_eintrag.append(rel.split("/", 1)[0] if "/" in rel else rel)
+    for o in ordner:
+        if not any(_passt(e.get("muster", ""), o, True) for e in eintraege) and o not in ohne_eintrag:
+            ohne_eintrag.append(o)
+    for name in sorted(set(ohne_eintrag)):
+        befunde.append(Finding(kat="H", path=f".live/{name}", severity="warn",
+                               detail=f"Senke ohne Eintrag in {relreg}: .live/{name} — wer liest das?"))
+    # Leser und Schreiber je Eintrag
+    for e in eintraege:
+        muster = e.get("muster", "")
+        leser = str(e.get("leser", "") or "").strip()
+        bis = e.get("entscheidung_bis")
+        if isinstance(bis, str):
+            try:
+                bis = date.fromisoformat(bis)
+            except ValueError:
+                bis = None
+        if not leser or leser.startswith("—") or leser.upper().startswith("NICHT GEMESSEN"):
+            sev = "error" if (bis and today > bis) else "warn"
+            befunde.append(Finding(kat="H", path=relreg, severity=sev,
+                                   detail=f"{muster}: ohne Leser ({leser or 'leer'}) — Entscheidung bis "
+                                          f"{bis or 'NICHT GESETZT'}{' ÜBERFÄLLIG' if sev == 'error' else ''}"))
+        takt = e.get("takt_stunden")
+        if takt and treffer.get(muster):
+            daten = []
+            for rel in treffer[muster]:
+                m = re.search(r"(\d{4}-\d{2}-\d{2})", rel)
+                if m:
+                    try:
+                        daten.append(date.fromisoformat(m.group(1)))
+                    except ValueError:
+                        pass
+            if daten:
+                juengst = max(daten)
+                alter_h = (today - juengst).days * 24
+                if alter_h > 3 * float(takt):
+                    befunde.append(Finding(kat="H", path=relreg, severity="warn",
+                                           detail=f"{muster}: Schreiber still — jüngste Datei {juengst} "
+                                                  f"({(today - juengst).days} Tage), Takt {takt} h; der Leser wartet auf nichts"))
+    return befunde
+
+
 # ---------------- Runner ----------------
 
 def run_lint(
@@ -645,6 +757,7 @@ def run_lint(
         report.kat_d = kat_d_quarantine_cascade(kb_root)
         report.kat_e = kat_e_suggested_concepts(kb_root)
         report.kat_g = kat_g_kedb_hygiene(kb_root)
+        report.kat_h = kat_h_senken(kb_root, today=today)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"runner-exception: {type(exc).__name__}: {exc}")
     return report
@@ -662,7 +775,7 @@ def format_markdown(report: LintReport) -> str:
         # kb-lint-befunde.py:58 (regex) lesen genau diese Zeile. Neues wird
         # ANGEHAENGT, nie eingesetzt.
         f"- total findings: {report.total()}",
-        f"- Kategorien: {7 - len(nicht)} von 7 gemessen"
+        f"- Kategorien: {8 - len(nicht)} von 8 gemessen"
         + (f" · {len(nicht)} NICHT GEBAUT ({', '.join(nicht)})" if nicht else ""),
     ]
     # Nur wenn beide Sorten vorkommen. Sind alle Kategorien gemessen, waere die
@@ -692,6 +805,7 @@ def format_markdown(report: LintReport) -> str:
         ("E", "Suggested Concepts"),
         ("F", "Stale Reviews"),
         ("G", "KEDB-Hygiene (eindeutige KE-IDs, Bestandszahl Teil C)"),
+        ("H", "Senke ohne Leser (kb/.live gegen registries/senken.yaml)"),
     ]
     for code, title in sections:
         kat = getattr(report, f"kat_{code.lower()}")
